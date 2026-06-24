@@ -1,0 +1,5 @@
+project_id  = "mon-projet-gcp-123456"
+region      = "europe-west1"
+db_password = "change-me-strong-password"
+jwt_secret  = "change-me-jwt-secret-min-32-chars"
+image_tag   = "latest"

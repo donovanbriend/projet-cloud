@@ -1,0 +1,105 @@
+name: Build & Deploy
+
+on:
+  push:
+    branches: [main]
+
+env:
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  REGION: europe-west1
+  REGISTRY: europe-west1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/notula
+
+jobs:
+  # ── Build & Push Docker images ──────────────────────────────────
+  build:
+    name: Build images
+    runs-on: ubuntu-latest
+
+    outputs:
+      image_tag: ${{ steps.tag.outputs.tag }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set image tag
+        id: tag
+        run: echo "tag=${GITHUB_SHA::8}" >> $GITHUB_OUTPUT
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      - name: Build & push auth-service
+        uses: docker/build-push-action@v5
+        with:
+          context: ./auth-service
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/auth-service:${{ steps.tag.outputs.tag }}
+            ${{ env.REGISTRY }}/auth-service:latest
+
+      - name: Build & push notes-service
+        uses: docker/build-push-action@v5
+        with:
+          context: ./notes-service
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/notes-service:${{ steps.tag.outputs.tag }}
+            ${{ env.REGISTRY }}/notes-service:latest
+
+      - name: Build & push frontend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          push: true
+          build-args: |
+            VITE_AUTH_URL=${{ secrets.AUTH_SERVICE_URL }}
+            VITE_NOTES_URL=${{ secrets.NOTES_SERVICE_URL }}
+          tags: |
+            ${{ env.REGISTRY }}/frontend:${{ steps.tag.outputs.tag }}
+            ${{ env.REGISTRY }}/frontend:latest
+
+  # ── Deploy to Cloud Run ─────────────────────────────────────────
+  deploy:
+    name: Deploy to Cloud Run
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Deploy auth-service
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: notula-auth
+          image: ${{ env.REGISTRY }}/auth-service:${{ needs.build.outputs.image_tag }}
+          region: ${{ env.REGION }}
+
+      - name: Deploy notes-service
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: notula-notes
+          image: ${{ env.REGISTRY }}/notes-service:${{ needs.build.outputs.image_tag }}
+          region: ${{ env.REGION }}
+
+      - name: Deploy frontend
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: notula-frontend
+          image: ${{ env.REGISTRY }}/frontend:${{ needs.build.outputs.image_tag }}
+          region: ${{ env.REGION }}
+
+      - name: Print deployed URLs
+        run: |
+          echo "✅ Deployment complete"
+          echo "Frontend: $(gcloud run services describe notula-frontend --region=${{ env.REGION }} --format='value(status.url)')"
+          echo "Auth:     $(gcloud run services describe notula-auth     --region=${{ env.REGION }} --format='value(status.url)')"
+          echo "Notes:    $(gcloud run services describe notula-notes    --region=${{ env.REGION }} --format='value(status.url)')"
